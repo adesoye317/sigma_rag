@@ -16,7 +16,6 @@
 - [How It Works](#how-it-works)
 - [Evaluation & Anti-Hallucination](#evaluation--anti-hallucination)
 - [Security & Tenant Isolation](#security--tenant-isolation)
-- [Known Limitations](#known-limitations)
 
 ---
 
