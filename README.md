@@ -287,11 +287,3 @@ Thresholds used for colour coding: Confidence ≥ 65% green / ≥ 50% amber / < 
 - The LLM is instructed never to reveal tenant IDs, chunk IDs, similarity scores, or system internals, and to decline requests for credentials or sensitive personal data
 
 ---
-
-## Known Limitations
-
-- **Static benchmarks** — industry benchmark data is hardcoded for ~8 common metrics. Niche metrics won't trigger a benchmark card. A production version should pull from a curated dataset or secondary retrieval index.
-- **Single-tenant per session** — `VITE_TENANT_ID` is set at build/deploy time. Multi-tenant auth (e.g. JWT-based tenant resolution) would be needed for a production SaaS deployment.
-- **No re-ranking model** — retrieval uses cosine similarity only. A cross-encoder re-ranker (e.g. `ms-marco-MiniLM`) would improve precision on ambiguous queries.
-- **Table extraction is layout-dependent** — pdfplumber's line-based table finder works well on ruled tables but may miss borderless or colour-background tables in complex PDFs.
-- **Greeting detection is pattern-based** — the regex + set approach covers common cases but won't catch all conversational openers (e.g. "What's good?"). A lightweight intent classifier would be more robust at scale.
