@@ -3,9 +3,6 @@ Patches and improvements over the reviewed codebase.
 Each section is labelled with the issue it fixes.
 """
 
-# ══════════════════════════════════════════════════════════════════════════════
-# FIX 1 — conversations.py: register the delete route + move /eval above /{id}
-# ══════════════════════════════════════════════════════════════════════════════
 # FastAPI matches routes top-to-bottom. A parameterised segment like /{conv_id}
 # will swallow the literal string "eval" and try int("eval") → HTTP 422.
 # Rule: always register specific literal paths BEFORE parameterised ones.
@@ -82,7 +79,6 @@ async def create_conversation(
     return {"id": conv_id, "title": body.title}
 
 
-# ── FIX 1: /eval MUST come before /{conv_id} ─────────────────────────────────
 @conversations_router.get("/eval")
 async def get_eval_log(
     tenant_id: str = Depends(get_tenant),
@@ -236,17 +232,7 @@ async def _generate_prompts_safe(tenant_id, doc_id, tag, sample, pool):
         log.warning("Background prompt generation failed: %s", e)
 
 
-# In upload_file, replace:
-#   await _generate_prompts(tenant_id, doc_id, tag, sample, pool)
-# with:
-#   asyncio.create_task(_generate_prompts_safe(tenant_id, doc_id, tag, sample, pool))
 
-
-# ══════════════════════════════════════════════════════════════════════════════
-# FIX 3 — services.py: token-budgeted history + smarter refusal messages
-# ══════════════════════════════════════════════════════════════════════════════
-
-# ── 3a. History budget ────────────────────────────────────────────────────────
 _MAX_HISTORY_TOKENS = 600   # ~450 words of prior conversation
 _APPROX_CHARS_PER_TOKEN = 4
 
@@ -268,7 +254,6 @@ def _trim_history(history: list[dict], budget_tokens: int = _MAX_HISTORY_TOKENS)
     return list(reversed(kept))
 
 
-# ── 3b. Contextual refusal message ───────────────────────────────────────────
 _REFUSAL_HINTS: list[tuple[list[str], str]] = [
     (
         ["cac", "ltv", "revenue", "budget", "mrr", "arr", "burn", "runway",
@@ -341,7 +326,6 @@ async def stream_answer_v2(
             yield delta
 
 
-# ── 3d. Updated chat route using the fixes above ─────────────────────────────
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel as _BaseModel
 
@@ -421,7 +405,7 @@ def _dedupe_sources(chunks) -> list[dict]:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# IMPROVEMENT — re-rank chunks before feeding to LLM
+#   re-rank chunks before feeding to LLM
 # ══════════════════════════════════════════════════════════════════════════════
 # Pure vector similarity sometimes surfaces off-topic chunks when the query is
 # short or ambiguous.  A lightweight BM25-style keyword boost applied on top of
