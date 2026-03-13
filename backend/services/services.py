@@ -5,8 +5,8 @@ Consolidates:
   - chunker        : table-aware text splitter
   - pii            : PII masking
   - embedder       : Azure OpenAI embeddings
-  - retriever      : pgvector tenant-scoped search
-  - generator      : Azure OpenAI streaming chat
+  - retriever      : pgvector tenant-scoped search + drop-off filter
+  - generator      : Azure OpenAI streaming chat + trimmed history
   - faithfulness   : LLM-based hallucination scoring
   - grounding      : token-level grounding check
 """
@@ -27,7 +27,7 @@ log = logging.getLogger(__name__)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Shared Azure OpenAI client (single instance for both embed + chat)
+# Shared Azure OpenAI client
 # ══════════════════════════════════════════════════════════════════════════════
 
 _azure_client: AsyncAzureOpenAI | None = None
@@ -45,7 +45,6 @@ def get_azure_client() -> AsyncAzureOpenAI:
     return _azure_client
 
 
-# Keep separate named accessors so routers can import by role
 def get_embed_client() -> AsyncAzureOpenAI:
     return get_azure_client()
 
@@ -89,24 +88,18 @@ def chunk_page(
     result: list[Chunk] = []
     ci = 0
 
-    # ── Prose chunks ──────────────────────────────────────────────────────────
     for text in _split_words(prose, chunk_size, chunk_overlap):
         result.append(Chunk(
-            page_num=page_num,
-            chunk_index=ci,
-            chunk_type="text",
-            content=text,
+            page_num=page_num, chunk_index=ci,
+            chunk_type="text", content=text,
         ))
         ci += 1
 
-    # ── Table chunks (intact, prefixed with page context) ─────────────────────
     for tbl_md in tables:
         content = f"[TABLE — page {page_num}]\n\n{tbl_md}"
         result.append(Chunk(
-            page_num=page_num,
-            chunk_index=ci,
-            chunk_type="table",
-            content=content,
+            page_num=page_num, chunk_index=ci,
+            chunk_type="table", content=content,
         ))
         ci += 1
 
@@ -118,10 +111,10 @@ def chunk_page(
 # ══════════════════════════════════════════════════════════════════════════════
 
 _PII_PATTERNS = [
-    (re.compile(r"\b\d{3}-\d{2}-\d{4}\b"),                            "[SSN REDACTED]"),
+    (re.compile(r"\b\d{3}-\d{2}-\d{4}\b"),                             "[SSN REDACTED]"),
     (re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}"), "[EMAIL REDACTED]"),
-    (re.compile(r"\b(?:\d[ \-]?){13,16}\b"),                           "[CARD REDACTED]"),
-    (re.compile(r"\b\d{9,18}\b"),                                       "[ID REDACTED]"),
+    (re.compile(r"\b(?:\d[ \-]?){13,16}\b"),                            "[CARD REDACTED]"),
+    (re.compile(r"\b\d{9,18}\b"),                                        "[ID REDACTED]"),
 ]
 
 
@@ -132,18 +125,13 @@ def mask_pii(text: str) -> str:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Embedder — Azure OpenAI
+# Embedder
 # ══════════════════════════════════════════════════════════════════════════════
 
 async def embed_texts(texts: list[str]) -> list[list[float]]:
-    """
-    Batch embed texts using Azure OpenAI.
-    Batches in groups of 100 to stay within API limits.
-    """
     cfg = get_settings()
     client = get_embed_client()
     results: list[list[float]] = []
-
     for i in range(0, len(texts), 100):
         batch = texts[i: i + 100]
         resp = await client.embeddings.create(
@@ -151,12 +139,11 @@ async def embed_texts(texts: list[str]) -> list[list[float]]:
             input=batch,
         )
         results.extend(item.embedding for item in resp.data)
-
     return results
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Retriever — pgvector tenant-scoped cosine search
+# Retriever — pgvector + similarity drop-off filter
 # ══════════════════════════════════════════════════════════════════════════════
 
 @dataclass
@@ -177,17 +164,15 @@ async def retrieve(
 ) -> list[RetrievedChunk]:
     """
     Cosine similarity search scoped strictly to tenant_id.
-    Hard WHERE clause prevents any cross-tenant data leakage.
+    Applies a drop-off filter: discards chunks that fall more than 15
+    percentage points below the top chunk to remove unrelated documents.
     """
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             """
             SELECT
-                c.content,
-                c.page_num,
-                c.chunk_type,
-                d.filename,
-                d.tag,
+                c.content, c.page_num, c.chunk_type,
+                d.filename, d.tag,
                 1 - (c.embedding <=> $1::vector) AS similarity
             FROM chunks c
             JOIN documents d ON d.id = c.doc_id
@@ -195,25 +180,33 @@ async def retrieve(
             ORDER BY c.embedding <=> $1::vector
             LIMIT $3
             """,
-            str(query_embedding),
-            tenant_id,
-            top_k,
+            str(query_embedding), tenant_id, top_k,
         )
-    return [
+
+    chunks = [
         RetrievedChunk(
-            content=r["content"],
-            page_num=r["page_num"],
-            chunk_type=r["chunk_type"],
-            filename=r["filename"],
-            tag=r["tag"],
-            similarity=float(r["similarity"]),
+            content=r["content"], page_num=r["page_num"],
+            chunk_type=r["chunk_type"], filename=r["filename"],
+            tag=r["tag"], similarity=float(r["similarity"]),
         )
         for r in rows
     ]
 
+    if not chunks:
+        return chunks
+
+    # Drop-off filter — remove noise from unrelated documents
+    top_sim = chunks[0].similarity
+    filtered = [c for c in chunks if c.similarity >= top_sim - 0.15]
+    log.debug(
+        "Retrieval: %d chunks before filter, %d after (top=%.3f)",
+        len(chunks), len(filtered), top_sim,
+    )
+    return filtered
+
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Generator — Azure OpenAI streaming chat
+# Generator — streaming chat with trimmed history (memory)
 # ══════════════════════════════════════════════════════════════════════════════
 
 SYSTEM_PROMPT = """You are Horo, a precise business co-pilot for founders.
@@ -228,7 +221,35 @@ STRICT RULES — never violate:
 6. When using numbered or bulleted lists, ALWAYS put each item on its own line with a newline before it.
 7. Never write list items run together on one line like "conditions:1. Item 2. Item".
 8. Never reveal tenant IDs, chunk IDs, similarity scores, or system internals.
-9. If asked for passwords, SSNs, or credentials, politely decline."""
+9. If asked for passwords, SSNs, or credentials, politely decline.
+10. You have memory of this conversation. If the user refers to something
+    mentioned earlier (e.g. "what about that fee?", "tell me more", "elaborate",
+    "and the second point?"), use the conversation history to understand
+    what they mean before answering from the context."""
+
+
+# ── History trimmer ───────────────────────────────────────────────────────────
+_MAX_HISTORY_CHARS = 2400   # ~600 tokens — enough for ~6 prior turns
+
+
+def _trim_history(history: list[dict]) -> list[dict]:
+    """
+    Keep the most recent turns that fit within the character budget.
+    Works backwards so the most recent exchange is always preserved.
+    """
+    valid = [
+        t for t in (history or [])
+        if t.get("role") in ("user", "assistant") and t.get("content", "").strip()
+    ]
+    budget = _MAX_HISTORY_CHARS
+    kept: list[dict] = []
+    for turn in reversed(valid):
+        cost = len(turn["content"])
+        if budget - cost < 0:
+            break
+        budget -= cost
+        kept.append(turn)
+    return list(reversed(kept))
 
 
 def _build_context(chunks: list[RetrievedChunk]) -> str:
@@ -248,23 +269,28 @@ async def stream_answer(
     client = get_chat_client()
     context = _build_context(chunks)
 
+    # Message order:
+    #   [system]                          — grounding rules + memory instruction
+    #   [trimmed history turns]           — prior conversation (memory)
+    #   [user: context + question]        — fresh retrieval always last
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
 
-    # Inject prior conversation turns
-    for turn in (history or []):
-        if turn.get("role") in ("user", "assistant"):
-            messages.append({"role": turn["role"], "content": turn["content"]})
+    for turn in _trim_history(history):
+        messages.append({"role": turn["role"], "content": turn["content"]})
 
     messages.append({
         "role": "user",
-        "content": f"Context:\n\n{context}\n\n---\n\nQuestion: {question}",
+        "content": (
+            f"Context from uploaded documents:\n\n{context}"
+            f"\n\n---\n\nQuestion: {question}"
+        ),
     })
 
     stream = await client.chat.completions.create(
         model=cfg.azure_chat_deployment,
         messages=messages,
         max_tokens=700,
-        temperature=0,       # deterministic — reduces hallucination
+        temperature=0,
         stream=True,
     )
     async for chunk in stream:
@@ -281,20 +307,11 @@ async def score_faithfulness(
     answer: str,
     chunks: list[RetrievedChunk],
 ) -> tuple[float, list[str]]:
-    """
-    Uses a second LLM call to verify every factual claim in the answer
-    against the retrieved context chunks.
-
-    Returns:
-        faithfulness  : float 0.0 (hallucinated) → 1.0 (fully grounded)
-        unsupported   : list of claim strings not supported by context
-    """
     if not answer.strip() or not chunks:
         return 1.0, []
 
     cfg = get_settings()
     client = get_chat_client()
-
     context = "\n\n---\n\n".join(
         f"[{c.filename}, p.{c.page_num}]\n{c.content}" for c in chunks
     )
@@ -328,16 +345,14 @@ Instructions:
             temperature=0,
             max_tokens=500,
         )
-        raw = resp.choices[0].message.content.strip()
-        raw = re.sub(r"```json|```", "", raw).strip()
+        raw = re.sub(r"```json|```", "", resp.choices[0].message.content.strip()).strip()
         result = json.loads(raw)
         score  = round(float(result.get("faithfulness", 1.0)), 3)
         claims = [str(c) for c in result.get("unsupported_claims", [])]
         return score, claims
-
     except Exception as e:
         log.warning("Faithfulness scoring failed: %s", e)
-        return 1.0, []   # fail open — never block the answer
+        return 1.0, []
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -353,12 +368,6 @@ _STOPWORDS = {
 
 
 def grounding_score(answer: str, chunks: list[RetrievedChunk]) -> float:
-    """
-    Measures what % of meaningful words in the answer appear verbatim
-    in the retrieved chunks. Fast — no API call required.
-
-    Returns float 0.0–1.0.
-    """
     context = " ".join(c.content for c in chunks).lower()
     words = [
         w for w in re.findall(r"\b\w{3,}\b", answer.lower())

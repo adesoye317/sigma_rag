@@ -57,10 +57,10 @@ async def db() -> asyncpg.Pool:
 upload_router = APIRouter(prefix="/upload", tags=["upload"])
 
 _TAG_RULES = [
-    (["loan", "policy", "rule", "guideline", "credit"],                        "Policy"),
-    (["handbook", "manual", "guide", "onboard", "sop"],                        "Operations"),
+    (["loan", "policy", "rule", "guideline", "credit"],                          "Policy"),
+    (["handbook", "manual", "guide", "onboard", "sop"],                          "Operations"),
     (["finance", "budget", "revenue", "sheet", "q1","q2","q3","q4","cac","ltv"], "Finance"),
-    (["pitch", "deck", "investor", "teaser"],                                  "Pitch"),
+    (["pitch", "deck", "investor", "teaser"],                                    "Pitch"),
 ]
 
 
@@ -269,6 +269,34 @@ def _is_greeting(text: str) -> bool:
     return s in _GREETINGS or bool(_GREETING_RE.match(s))
 
 
+# ── Follow-up detector ────────────────────────────────────────────────────────
+# These phrases have no retrieval keywords — we re-use the prior question
+# for retrieval so the same chunks are returned, but pass the actual
+# follow-up text to the LLM so it answers in the right register.
+
+_FOLLOWUP_RE = re.compile(
+    r"^[\W]*(tell me more|more|elaborate|continue|go on|expand|explain more|"
+    r"can you elaborate|what else|and\??|so\??|yes please|please continue|"
+    r"keep going|what about that|say more|details please|more details|"
+    r"give me more|can you expand|please elaborate|carry on)[\W]*$",
+    re.IGNORECASE,
+)
+
+
+def _is_followup(text: str) -> bool:
+    return bool(_FOLLOWUP_RE.match(text.strip()))
+
+
+def _get_last_user_question(history: list[dict]) -> str | None:
+    """Walk history backwards to find the last substantive user question."""
+    for turn in reversed(history or []):
+        if turn.get("role") == "user":
+            q = turn.get("content", "").strip()
+            if q and not _is_followup(q) and not _is_greeting(q):
+                return q
+    return None
+
+
 # ── Contextual refusal hints ──────────────────────────────────────────────────
 _REFUSAL_HINTS: list[tuple[list[str], str]] = [
     (
@@ -327,6 +355,7 @@ def _dedupe_sources(chunks: list[RetrievedChunk]) -> list[dict]:
     ]
 
 
+# ── Chat endpoint ─────────────────────────────────────────────────────────────
 @chat_router.post("")
 async def chat(
     req: ChatRequest,
@@ -338,7 +367,7 @@ async def chat(
     if not req.question.strip():
         raise HTTPException(400, "Empty question")
 
-    # ── 1. Greeting short-circuit — no embed, no retrieval ────────────────────
+    # 1. Greeting short-circuit — no embed, no retrieval
     if _is_greeting(req.question):
         log.info("Greeting detected — skipping RAG pipeline")
         return {
@@ -354,14 +383,24 @@ async def chat(
             "greeting":   True,
         }
 
-    # ── 2. Embed question ─────────────────────────────────────────────────────
-    q_embs = await embed_texts([req.question])
-    q_emb = q_embs[0]
+    # 2. Follow-up detection — retrieve on the prior substantive question
+    #    so "tell me more" gets the same chunks as the original question.
+    #    The actual follow-up text is still passed to the LLM.
+    retrieval_query = req.question
+    if _is_followup(req.question):
+        prior = _get_last_user_question(req.history)
+        if prior:
+            log.info("Follow-up '%s' — retrieving on: %s", req.question, prior)
+            retrieval_query = prior
 
-    # ── 3. Retrieve (tenant-scoped) ───────────────────────────────────────────
+    # 3. Embed retrieval query
+    q_embs = await embed_texts([retrieval_query])
+    q_emb  = q_embs[0]
+
+    # 4. Retrieve (tenant-scoped, with drop-off filter)
     chunks = await retrieve(q_emb, tenant_id, pool, top_k=cfg.top_k)
 
-    # ── 4. Empty knowledge base ───────────────────────────────────────────────
+    # 5. Empty knowledge base
     if not chunks:
         return _no_docs_response(
             "Your knowledge base is empty — upload a document to get started."
@@ -369,13 +408,15 @@ async def chat(
 
     best = chunks[0].similarity
 
-    # ── 5. Similarity gate — anti-hallucination hard stop ─────────────────────
+    # 6. Similarity gate — anti-hallucination hard stop
     if best < cfg.sim_threshold:
         return _no_docs_response(_refusal_hint(req.question))
 
-    # ── 6. Stream answer + post-generation scoring ────────────────────────────
+    # 7. Stream answer + post-generation scoring
     async def event_stream():
         full_text = ""
+        # Pass the ACTUAL question (not retrieval_query) so the LLM
+        # answers "tell me more" in context, not re-answers the prior question
         async for token in stream_answer(req.question, chunks, req.history):
             full_text += token
             yield f"data: {token}\n\n"
