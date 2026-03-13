@@ -729,7 +729,7 @@ export default function App() {
               <button onClick={e => deleteSession(e, s.id)}
                 style={{ background: "none", border: "none", color: "rgba(255,255,255,.35)", cursor: "pointer", fontSize: 13, padding: "0 2px", flexShrink: 0 }}
                 onMouseEnter={e => e.currentTarget.style.color = "#ef4444"}
-                onMouseLeave={e => e.currentTarget.style.color = "rgba(255,255,255,.35)"}>✕</button>
+                onMouseLeave={e => e.currentTarget.style.color = "rgba(255,255,255,.35)"}>🗑</button>
             </div>
           ))}
         </div>
@@ -759,7 +759,7 @@ export default function App() {
         {error && (
           <div style={{ background: "#fee2e2", color: "#991b1b", padding: "8px 24px", fontSize: 13, display: "flex", justifyContent: "space-between" }}>
             ⚠ {error}
-            <button onClick={() => setError(null)} style={{ background: "none", border: "none", cursor: "pointer", color: "#991b1b" }}>✕</button>
+            <button onClick={() => setError(null)} style={{ background: "none", border: "none", cursor: "pointer", color: "#991b1b" }}>🗑</button>
           </div>
         )}
 
@@ -861,19 +861,33 @@ export default function App() {
                   <div style={{ padding: "12px 16px", background: "#f8fafc", display: "grid", gridTemplateColumns: "1fr 90px 70px 70px 40px", gap: 8, fontSize: 11, color: "#6b7280", fontWeight: 600, textTransform: "uppercase" }}>
                     <span>File</span><span>Tag</span><span>Pages</span><span>Chunks</span><span></span>
                   </div>
-                  {files.map(f => (
-                    <div key={f.id} className="file-row" style={{ padding: "14px 16px", display: "grid", gridTemplateColumns: "1fr 90px 70px 70px 40px", gap: 8, fontSize: 13, borderTop: "1px solid #f1f5f9", alignItems: "center" }}>
-                      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                        <span style={{ fontSize: 18 }}>{f.filename?.endsWith(".pdf") ? "📄" : f.filename?.endsWith(".xlsx") ? "📊" : "📝"}</span>
-                        <span style={{ fontWeight: 500, color: "#1f2937", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{f.filename}</span>
+                  {files.map(f => {
+                    const icon = f.filename?.endsWith(".pdf") ? "📄" : f.filename?.endsWith(".xlsx") ? "📊" : "📝";
+                    const tag  = f.tag || "Document";
+                    // Shorten long filenames: keep first 32 chars + "…" + extension
+                    const ext      = f.filename?.split(".").pop() || "";
+                    const base     = f.filename?.replace(/\.[^.]+$/, "") || "";
+                    const shortName = base.length > 32
+                      ? `${base.slice(0, 32)}….${ext}`
+                      : f.filename;
+                    return (
+                      <div key={f.id} className="file-row" style={{ padding: "14px 16px", display: "grid", gridTemplateColumns: "1fr 90px 70px 70px 40px", gap: 8, fontSize: 13, borderTop: "1px solid #f1f5f9", alignItems: "center" }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
+                          <span style={{ fontSize: 18, flexShrink: 0 }}>{icon}</span>
+                          <span
+                            title={f.filename}
+                            style={{ fontWeight: 500, color: "#1f2937", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                            {shortName}
+                          </span>
+                        </div>
+                        <span style={{ background: "#eff6ff", color: "#2563eb", borderRadius: 99, padding: "2px 8px", fontSize: 11, textAlign: "center", whiteSpace: "nowrap" }}>{tag}</span>
+                        <span style={{ color: "#6b7280" }}>{f.page_count ?? "—"}</span>
+                        <span style={{ color: "#6b7280" }}>{f.chunk_count ?? "—"}</span>
+                        <button onClick={() => { api.deleteFile(f.id); setFiles(fl => fl.filter(x => x.id !== f.id)); }}
+                          style={{ background: "none", border: "none", cursor: "pointer", color: "#ef4444", fontSize: 16 }}>🗑</button>
                       </div>
-                      <span style={{ background: "#eff6ff", color: "#2563eb", borderRadius: 99, padding: "2px 8px", fontSize: 11, textAlign: "center" }}>{f.tag}</span>
-                      <span style={{ color: "#6b7280" }}>{f.page_count}</span>
-                      <span style={{ color: "#6b7280" }}>{f.chunk_count}</span>
-                      <button onClick={() => { api.deleteFile(f.id); setFiles(fl => fl.filter(x => x.id !== f.id)); }}
-                        style={{ background: "none", border: "none", cursor: "pointer", color: "#ef4444", fontSize: 16 }}>✕</button>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               )}
 
