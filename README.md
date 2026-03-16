@@ -187,7 +187,14 @@ Open `http://localhost:5173`.
 
 | Variable | Description |
 |---|---|
-| `DATABASE_URL` | PostgreSQL connection string |
+| `DB_HOST` | PostgreSQL IP or host |
+| `DB_PORT` | PostgreSQL port |
+| `DB_NAME` | PostgreSQL DB name |
+| `DB_USER` | PostgreSQL DB username |
+| `DB_POOL_MIN` | PostgreSQL mininum pool size |
+| `DB_PASSWORD` | PostgreSQL password |
+| `DB_POOL_MAX` | PostgreSQL Max pool size |
+| `DB_SSL` | PostgreSQL connection string |
 | `AZURE_OPENAI_ENDPOINT` | Azure OpenAI resource endpoint |
 | `AZURE_OPENAI_API_KEY` | Azure OpenAI API key |
 | `AZURE_OPENAI_API_VERSION` | e.g. `2024-02-01` |
@@ -197,6 +204,8 @@ Open `http://localhost:5173`.
 | `TOP_K` | Chunks retrieved per query (default `6`) |
 | `CHUNK_SIZE` | Words per text chunk (default `800`) |
 | `CHUNK_OVERLAP` | Overlap between chunks (default `150`) |
+| `CORS_ORIGINS` | list all the url that needs to be white listed |
+| `LOG_LEVEL` | log detail|
 
 ### Frontend (`.env`)
 
